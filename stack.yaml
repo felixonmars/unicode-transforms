@@ -1,3 +1,6 @@
 packages:
 - '.'
 resolver: lts-16.6
+extra-deps:
+- github: composewell/unicode-data
+  commit: a983f17c8b951e975a069fb1f97a2522305533cb

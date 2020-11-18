@@ -3,3 +3,5 @@ packages:
 resolver: lts-9.21
 extra-deps:
 - gauge-0.2.4
+- github: composewell/unicode-data
+  commit: a983f17c8b951e975a069fb1f97a2522305533cb
