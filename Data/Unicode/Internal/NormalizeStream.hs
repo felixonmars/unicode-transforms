@@ -36,10 +36,10 @@ import           Data.Text.Internal.Unsafe.Shift        (shiftR)
 import           GHC.ST                                 (ST (..))
 import           GHC.Types                              (SPEC(..))
 
-import qualified Data.Unicode.Properties.CombiningClass  as CC
-import qualified Data.Unicode.Properties.Compositions    as C
-import qualified Data.Unicode.Properties.Decompose       as D
-import qualified Data.Unicode.Properties.DecomposeHangul as H
+import qualified Unicode.UCD.CombiningClass        as CC
+import qualified Unicode.UCD.Compose               as C
+import qualified Unicode.UCD.Decompose             as D
+import qualified Unicode.UCD.Hangul                as H
 
 -------------------------------------------------------------------------------
 -- Reorder buffer to hold characters till the next starter boundary
@@ -53,20 +53,20 @@ data ReBuf = Empty | One !Char | Many !Char !Char ![Char]
 insertIntoReBuf :: Char -> ReBuf -> ReBuf
 insertIntoReBuf c Empty = One c
 insertIntoReBuf c (One c0)
-    | CC.getCombiningClass c < CC.getCombiningClass c0
+    | CC.combiningClass c < CC.combiningClass c0
     = Many c c0 []
     | otherwise
     = Many c0 c []
 insertIntoReBuf c (Many c0 c1 cs)
-    | cc < CC.getCombiningClass c0
+    | cc < CC.combiningClass c0
     = Many c c0 (c1 : cs)
-    | cc < CC.getCombiningClass c1
+    | cc < CC.combiningClass c1
     = Many c0 c (c1 : cs)
     | otherwise
     = Many c0 c1 (cs' ++ (c : cs''))
     where
-        cc = CC.getCombiningClass c
-        (cs', cs'') = span ((<= cc) . CC.getCombiningClass) cs
+        cc = CC.combiningClass c
+        (cs', cs'') = span ((<= cc) . CC.combiningClass) cs
 
 writeStr :: A.MArray s -> Int -> [Char] -> ST s Int
 writeStr marr di str = go di str
@@ -106,7 +106,7 @@ decomposeCharHangul marr j c =
         n3 <- unsafeWrite marr (j + n1 + n2) t
         return (j + n1 + n2 + n3)
     where
-        (l, v, t) = D.decomposeCharHangul c
+        (l, v, t) = D.decomposeHangul c
 
 {-# INLINE decomposeChar #-}
 decomposeChar
@@ -117,11 +117,11 @@ decomposeChar
     -> Char             -- char to be decomposed
     -> ST s (Int, ReBuf)
 decomposeChar mode marr index reBuf ch
-    | D.isHangul ch = do
+    | H.isHangul ch = do
         j <- writeReorderBuffer marr index reBuf
         (, Empty) <$> decomposeCharHangul marr j ch
     | D.isDecomposable mode ch =
-        decomposeAll marr index reBuf (D.decomposeChar mode ch)
+        decomposeAll marr index reBuf (D.decompose mode ch)
     | otherwise =
         reorder marr index reBuf ch
 
@@ -131,7 +131,7 @@ decomposeChar mode marr index reBuf ch
     decomposeAll _ i rbuf [] = return (i, rbuf)
     decomposeAll arr i rbuf (x : xs)
         | D.isDecomposable mode x = do
-            (i', rbuf') <- decomposeAll arr i rbuf (D.decomposeChar mode x)
+            (i', rbuf') <- decomposeAll arr i rbuf (D.decompose mode x)
             decomposeAll arr i' rbuf' xs
         | otherwise  = do
             (i', rbuf') <- reorder arr i rbuf x
@@ -319,20 +319,20 @@ insertHangul arr i jbuf ch = do
 {-# INLINE insertIntoRegBuf #-}
 insertIntoRegBuf :: Char -> RegBuf -> RegBuf
 insertIntoRegBuf c (RegOne c0)
-    | CC.getCombiningClass c < CC.getCombiningClass c0
+    | CC.combiningClass c < CC.combiningClass c0
     = RegMany c c0 []
     | otherwise
     = RegMany c0 c []
 insertIntoRegBuf c (RegMany c0 c1 cs)
-    | cc < CC.getCombiningClass c0
+    | cc < CC.combiningClass c0
     = RegMany c c0 (c1 : cs)
-    | cc < CC.getCombiningClass c1
+    | cc < CC.combiningClass c1
     = RegMany c0 c (c1 : cs)
     | otherwise
     = RegMany c0 c1 (cs' ++ (c : cs''))
     where
-        cc = CC.getCombiningClass c
-        (cs', cs'') = span ((<= cc) . CC.getCombiningClass) cs
+        cc = CC.combiningClass c
+        (cs', cs'') = span ((<= cc) . CC.combiningClass) cs
 
 {-# INLINE writeRegBuf #-}
 writeRegBuf :: A.MArray s -> Int -> RegBuf -> ST s Int
@@ -341,7 +341,7 @@ writeRegBuf arr i = \case
         n <- unsafeWrite arr i c
         return (i + n)
     RegMany st c [] ->
-        case C.composePair st c of
+        case C.compose st c of
             Just x -> do
                 n <- unsafeWrite arr i x
                 return (i + n)
@@ -355,12 +355,12 @@ writeRegBuf arr i = \case
 
     -- arguments: uncombined chars, starter, unprocessed str
     go uncs st [] = writeStr arr i (st : uncs)
-    go uncs st (c : cs) = case C.composePair st c of
+    go uncs st (c : cs) = case C.compose st c of
         Nothing -> go (uncs ++ (c : same)) st bigger
         Just x  -> go uncs x cs
         where
-            cc = CC.getCombiningClass c
-            (same, bigger) = span ((== cc) . CC.getCombiningClass) cs
+            cc = CC.combiningClass c
+            (same, bigger) = span ((== cc) . CC.combiningClass) cs
 
 {-# INLINE flushComposeState #-}
 flushComposeState :: A.MArray s -> Int -> ComposeState -> ST s Int
@@ -428,21 +428,21 @@ composeChar mode marr = go0
     {-# INLINE initReg #-}
     initReg !ch !i
         | D.isDecomposable mode ch =
-            go (D.decomposeChar mode ch) i ComposeNone
+            go (D.decompose mode ch) i ComposeNone
         | otherwise =
             pure (i, ComposeReg (RegOne ch))
 
     {-# INLINE composeReg #-}
     composeReg rbuf !ch !i !st
         | D.isDecomposable mode ch =
-            go (D.decomposeChar mode ch) i st
+            go (D.decompose mode ch) i st
         | CC.isCombining ch = do
             pure (i, ComposeReg (insertIntoRegBuf ch rbuf))
         -- The first char in RegBuf may or may not be a starter. In
-        -- case it is not we rely on composeStarterPair failing.
+        -- case it is not we rely on composeStarters failing.
         | RegOne s <- rbuf
         , C.isSecondStarter ch
-        , Just x <- C.composeStarterPair s ch =
+        , Just x <- C.composeStarters s ch =
             pure (i, (ComposeReg (RegOne x)))
         | otherwise = do
             j <- writeRegBuf marr i rbuf
@@ -461,12 +461,12 @@ composeChar mode marr = go0
                     (k, s) <- initJamo ch j
                     go rest k s
                 | D.isDecomposable mode ch ->
-                    go (D.decomposeChar mode ch ++ rest) i st
+                    go (D.decompose mode ch ++ rest) i st
                 | CC.isCombining ch -> do
                     go rest i (ComposeReg (insertIntoRegBuf ch rbuf))
                 | RegOne s <- rbuf
                 , C.isSecondStarter ch
-                , Just x <- C.composeStarterPair s ch ->
+                , Just x <- C.composeStarters s ch ->
                     go rest i (ComposeReg (RegOne x))
                 | otherwise -> do
                     j <- writeRegBuf marr i rbuf
@@ -483,7 +483,7 @@ composeChar mode marr = go0
                     case () of
                         _
                             | D.isDecomposable mode ch ->
-                                go (D.decomposeChar mode ch ++ rest) j
+                                go (D.decompose mode ch ++ rest) j
                                    ComposeNone
                             | otherwise ->
                                 go rest j (ComposeReg (RegOne ch))
@@ -495,7 +495,7 @@ composeChar mode marr = go0
                     (j, s) <- initJamo ch i
                     go rest j s
                 | D.isDecomposable mode ch ->
-                    go (D.decomposeChar mode ch ++ rest) i st
+                    go (D.decompose mode ch ++ rest) i st
                 | otherwise ->
                     go rest i (ComposeReg (RegOne ch))
 
